@@ -1,7 +1,7 @@
 [project]
-name = "recorder"
+name = "u-teach-me"
 version = "0.1.0"
-description = "Add your description here"
+description = "A GUI Agent based on IDM & OpenAI VPT."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
