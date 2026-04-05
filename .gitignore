@@ -15,3 +15,6 @@ wheels/
 # Storage
 recordings
 dataset
+
+# Module
+*.pth
