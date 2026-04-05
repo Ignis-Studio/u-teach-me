@@ -6,6 +6,9 @@ FPS = 30
 IMG_SIZE = 224
 DIFF_THRESHOLD = 0.15  # 像素差均值低于此值则跳过（画面没变化）
 
+# 这些类型屏幕变化微弱，跳过像素差过滤直接保留
+NO_FILTER_TYPES = {'key', 'scroll'}
+
 
 def extract_frame(video_path, timestamp, output_path):
     """用 ffmpeg 精确抽取某时间点的帧，resize 到 224x224"""
@@ -29,7 +32,6 @@ def frames_are_similar(p1, p2):
     img2 = Image.open(p2).convert('RGB')
     diff = ImageChops.difference(img1, img2)
     avg = statistics.mean(sum(px) / 3 for px in diff.getdata())
-    print(f'    像素差: {avg:.4f}')
     return avg < DIFF_THRESHOLD
 
 
@@ -74,8 +76,10 @@ def process_one(video_path, json_path, output_dir):
             skipped += 1
             continue
 
-        if frames_are_similar(ft, ft1):
-            shutil.rmtree(sample_dir)
+        # key 和 scroll 屏幕变化微弱，直接保留不过滤
+        event_type = event.get('type', '')
+        if event_type not in NO_FILTER_TYPES and frames_are_similar(ft, ft1):
+            shutil.rmtree(sample_dir, ignore_errors=True)
             skipped += 1
             continue
 
@@ -102,7 +106,7 @@ def check_dataset(dataset_dir):
     print(f'  各类型分布：{dict(types)}')
     if len(samples) < 100:
         print('  ⚠️  样本数量偏少（建议 300+），考虑补录几段')
-    missing = [t for t in ['click', 'move', 'key'] if types.get(t, 0) == 0]
+    missing = [t for t in ['click', 'move', 'key', 'scroll'] if types.get(t, 0) == 0]
     if missing:
         print(f'  ⚠️  缺少操作类型：{missing}，请补录对应段')
     else:

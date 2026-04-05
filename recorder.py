@@ -9,7 +9,6 @@ from pathlib import Path
 from pynput import mouse, keyboard as kb
 from pynput.keyboard import HotKey
 
-# 仅在 Windows 下导入 winsound
 if platform.system() == 'Windows':
     import winsound
 
@@ -21,7 +20,6 @@ def beep_start():
     if platform.system() == 'Windows':
         winsound.Beep(880, 200)
     else:
-        # Linux/macOS 使用终端响铃符作为简单的声音提示替代
         print('\a', end='', flush=True)
 
 def beep_stop():
@@ -31,6 +29,7 @@ def beep_stop():
         winsound.Beep(440, 200)
     else:
         print('\a\a', end='', flush=True)
+
 
 class Recorder:
     def __init__(self):
@@ -59,6 +58,16 @@ class Recorder:
                 return
         self.events.append({'t': now, 'type': 'move', 'x': x, 'y': y})
 
+    def on_scroll(self, x, y, dx, dy):
+        if not self.running:
+            return
+        self.events.append({
+            't': time.time() - self.start_time,
+            'type': 'scroll',
+            'x': x, 'y': y,
+            'dx': dx, 'dy': dy,
+        })
+
     def on_key(self, key):
         if not self.running:
             return
@@ -76,8 +85,7 @@ class Recorder:
         self.running = True
 
         video_path = RECORDINGS_DIR / f'{name}.mp4'
-        
-        # 根据操作系统选择不同的 FFmpeg 抓屏参数
+
         system = platform.system()
         input_args = []
         if system == 'Windows':
@@ -85,22 +93,22 @@ class Recorder:
         elif system == 'Linux':
             display = os.environ.get('DISPLAY', ':0.0')
             input_args = ['-f', 'x11grab', '-i', display]
-        elif system == 'Darwin':  # macOS
+        elif system == 'Darwin':
             input_args = ['-f', 'avfoundation', '-i', '1']
         else:
-            print(f"不支持的操作系统: {system}")
+            print(f'不支持的操作系统: {system}')
             return
 
         cmd = [
             'ffmpeg', '-y',
-            '-framerate', str(FPS)
+            '-framerate', str(FPS),
         ] + input_args + [
-            '-vf', 'scale=1920:1024',
+            '-vf', 'scale=1920:1088',
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
             str(video_path)
         ]
-        
+
         self.ffmpeg_proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -113,6 +121,7 @@ class Recorder:
         self.mouse_listener = mouse.Listener(
             on_click=self.on_click,
             on_move=self.on_move,
+            on_scroll=self.on_scroll,
         )
         self.mouse_listener.start()
 
@@ -192,7 +201,7 @@ class App:
         hotkey_stop  = HotKey(HotKey.parse('<ctrl>+<shift>+s'), self._on_stop)
 
         def on_press(key):
-            self.recorder.on_key(key)  
+            self.recorder.on_key(key)
             hotkey_start.press(listener.canonical(key))
             hotkey_stop.press(listener.canonical(key))
 
