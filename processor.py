@@ -1,17 +1,28 @@
-import os, json, subprocess, statistics, shutil
+import os, json, subprocess, shutil
 from pathlib import Path
-from PIL import Image, ImageChops
 
 FPS = 30
 IMG_SIZE = 224
-DIFF_THRESHOLD = 0.15  # 像素差均值低于此值则跳过（画面没变化）
 
-# 这些类型屏幕变化微弱，跳过像素差过滤直接保留
-NO_FILTER_TYPES = {'key', 'scroll'}
+# 文件名前缀 → 只保留的事件类型
+# 注意：长前缀必须排在短前缀前面，避免 click 误匹配 dblclick
+PREFIX_TO_TYPE = [
+    ('dblclick', 'dblclick'),
+    ('click',    'click'),
+    ('drag',     'move'),
+    ('key',      'key'),
+    ('scroll',   'scroll'),
+]
+
+def get_expected_type(stem):
+    """根据文件名前缀判断应该保留的事件类型，长前缀优先匹配"""
+    for prefix, event_type in PREFIX_TO_TYPE:
+        if stem.startswith(prefix + '_'):
+            return prefix, event_type
+    return None, None
 
 
 def extract_frame(video_path, timestamp, output_path):
-    """用 ffmpeg 精确抽取某时间点的帧，resize 到 224x224"""
     cmd = [
         'ffmpeg', '-y',
         '-ss', f'{timestamp:.4f}',
@@ -26,17 +37,41 @@ def extract_frame(video_path, timestamp, output_path):
     return result.returncode == 0
 
 
-def frames_are_similar(p1, p2):
-    """判断两帧是否几乎相同（没有有效操作发生）"""
-    img1 = Image.open(p1).convert('RGB')
-    img2 = Image.open(p2).convert('RGB')
-    diff = ImageChops.difference(img1, img2)
-    avg = statistics.mean(sum(px) / 3 for px in diff.getdata())
-    return avg < DIFF_THRESHOLD
+def find_dblclicks(events, threshold=0.3):
+    """
+    把时间间隔小于 threshold 秒的相邻两次 click 合并为一个 dblclick 事件。
+    返回合并后的事件列表，跳过被合并掉的第二次 click。
+    """
+    result = []
+    i = 0
+    while i < len(events):
+        e = events[i]
+        if (e.get('type') == 'click'
+                and i + 1 < len(events)
+                and events[i+1].get('type') == 'click'
+                and events[i+1]['t'] - e['t'] < threshold):
+            # 合并为 dblclick，取第一次点击的坐标和时间
+            result.append({
+                't': e['t'],
+                'type': 'dblclick',
+                'x': e['x'],
+                'y': e['y'],
+                'button': e.get('button', ''),
+            })
+            i += 2  # 跳过第二次 click
+        else:
+            i += 1
+    return result
 
 
 def process_one(video_path, json_path, output_dir):
     output_dir = Path(output_dir)
+    stem = json_path.stem
+
+    category, expected_type = get_expected_type(stem)
+    if expected_type is None:
+        print(f'  无法识别文件名前缀：{stem}，跳过')
+        return 0
 
     # 已处理过则跳过
     if output_dir.exists() and any(output_dir.iterdir()):
@@ -47,8 +82,15 @@ def process_one(video_path, json_path, output_dir):
     with open(json_path) as f:
         data = json.load(f)
 
-    events = data['events']
+    raw_events = data['events']
     fps = data.get('fps', FPS)
+
+    # dblclick 录制需要先合并相邻 click
+    if category == 'dblclick':
+        events = find_dblclicks(raw_events)
+    else:
+        events = [e for e in raw_events if e.get('type') == expected_type]
+
     os.makedirs(output_dir, exist_ok=True)
     saved, skipped = 0, 0
 
@@ -65,20 +107,8 @@ def process_one(video_path, json_path, output_dir):
         ok1 = extract_frame(video_path, t, ft)
         ok2 = extract_frame(video_path, t_next, ft1)
 
-        if not ok1 or not ok2:
+        if not ok1 or not ok2 or not ft.exists() or not ft1.exists():
             print(f'  跳过 sample_{i:04d}：ffmpeg 抽帧失败')
-            shutil.rmtree(sample_dir, ignore_errors=True)
-            skipped += 1
-            continue
-
-        if not ft.exists() or not ft1.exists():
-            shutil.rmtree(sample_dir, ignore_errors=True)
-            skipped += 1
-            continue
-
-        # key 和 scroll 屏幕变化微弱，直接保留不过滤
-        event_type = event.get('type', '')
-        if event_type not in NO_FILTER_TYPES and frames_are_similar(ft, ft1):
             shutil.rmtree(sample_dir, ignore_errors=True)
             skipped += 1
             continue
@@ -88,12 +118,11 @@ def process_one(video_path, json_path, output_dir):
 
         saved += 1
 
-    print(f'  生成 {saved} 个样本，跳过 {skipped} 个')
+    print(f'  类型={expected_type}，生成 {saved} 个样本，跳过 {skipped} 个')
     return saved
 
 
 def check_dataset(dataset_dir):
-    """统计数据集质量"""
     samples = list(Path(dataset_dir).rglob('action.json'))
     if not samples:
         print('没有找到任何样本，请检查 dataset/ 目录')
@@ -106,7 +135,7 @@ def check_dataset(dataset_dir):
     print(f'  各类型分布：{dict(types)}')
     if len(samples) < 100:
         print('  ⚠️  样本数量偏少（建议 300+），考虑补录几段')
-    missing = [t for t in ['click', 'move', 'key', 'scroll'] if types.get(t, 0) == 0]
+    missing = [t for t in ['click', 'dblclick', 'key', 'scroll'] if types.get(t, 0) == 0]
     if missing:
         print(f'  ⚠️  缺少操作类型：{missing}，请补录对应段')
     else:
