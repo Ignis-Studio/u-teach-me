@@ -22,7 +22,7 @@ EPOCHS      = 50
 LR          = 1e-4
 VAL_SPLIT   = 0.2
 PATIENCE    = 10
-IMG_SIZE    = 224
+IMG_SIZE    = 672
 DEVICE      = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 ACTION_TYPES = ['click', 'dblclick', 'move', 'key', 'scroll']
@@ -62,10 +62,10 @@ class IDMDataset(Dataset):
             x = action.get('x', 0) / 1920
             y = action.get('y', 0) / 1080
             self.data.append((
-                img_t.to(DEVICE),
-                img_t1.to(DEVICE),
-                torch.tensor(action_type, dtype=torch.long).to(DEVICE),
-                torch.tensor([x, y], dtype=torch.float32).to(DEVICE),
+                img_t,
+                img_t1,
+                torch.tensor(action_type, dtype=torch.long),
+                torch.tensor([x, y], dtype=torch.float32),
             ))
         print(f'  加载完成')
 
@@ -102,48 +102,7 @@ class ConvBlock(nn.Module):
         return self.relu(self.net(x) + self.shortcut(x))
 
 
-class SimpleEncoder(nn.Module):
-    """轻量 CNN 编码器，输出 512 维特征"""
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(3, 64, 7, stride=2, padding=3, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(3, stride=2, padding=1),
-            ConvBlock(64,  128, stride=2),
-            ConvBlock(128, 256, stride=2),
-            ConvBlock(256, 512, stride=2),
-            nn.AdaptiveAvgPool2d(1),
-        )
 
-    def forward(self, x):
-        return self.net(x).squeeze(-1).squeeze(-1)  # (B, 512)
-
-
-class IDMModel(nn.Module):
-    def __init__(self, num_classes):
-        super().__init__()
-        self.encoder = SimpleEncoder()
-
-        self.classifier = nn.Sequential(
-            nn.Linear(1024, 256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, num_classes),
-        )
-
-        self.regressor = nn.Sequential(
-            nn.Linear(1024, 256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, 2),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, frame_t, frame_t1):
-        feat = torch.cat([self.encoder(frame_t), self.encoder(frame_t1)], dim=1)
-        return self.classifier(feat), self.regressor(feat)
 
 # ─── 训练 ────────────────────────────────────────────────────────────────────
 
@@ -178,6 +137,10 @@ def train():
 
         for ft, ft1, action_type, coords in train_loader:
 
+            ft, ft1 = ft.to(DEVICE), ft1.to(DEVICE)
+            action_type = action_type.to(DEVICE)
+            coords = coords.to(DEVICE)
+
             optimizer.zero_grad()
             logits, pred_coords = model(ft, ft1)
 
@@ -198,6 +161,9 @@ def train():
 
         with torch.no_grad():
             for ft, ft1, action_type, coords in val_loader:
+                ft, ft1 = ft.to(DEVICE), ft1.to(DEVICE)
+                action_type = action_type.to(DEVICE)
+                coords = coords.to(DEVICE)
 
                 logits, pred_coords = model(ft, ft1)
                 val_cls += cls_loss_fn(logits, action_type).item()

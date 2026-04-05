@@ -16,7 +16,7 @@ from PIL import Image
 
 # ─── 配置（需和 train_idm.py 保持一致）────────────────────────────────────────
 
-IMG_SIZE     = 224
+IMG_SIZE     = 672
 DEVICE       = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ACTION_TYPES = ['click', 'dblclick', 'move', 'key', 'scroll']
 TYPE_TO_IDX  = {t: i for i, t in enumerate(ACTION_TYPES)}
@@ -58,41 +58,7 @@ class ConvBlock(nn.Module):
     def forward(self, x):
         return self.relu(self.net(x) + self.shortcut(x))
 
-
-class SimpleEncoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(3, 64, 7, stride=2, padding=3, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(3, stride=2, padding=1),
-            ConvBlock(64,  128, stride=2),
-            ConvBlock(128, 256, stride=2),
-            ConvBlock(256, 512, stride=2),
-            nn.AdaptiveAvgPool2d(1),
-        )
-
-    def forward(self, x):
-        return self.net(x).squeeze(-1).squeeze(-1)
-
-
-class IDMModel(nn.Module):
-    def __init__(self, num_classes):
-        super().__init__()
-        self.encoder = SimpleEncoder()
-        self.classifier = nn.Sequential(
-            nn.Linear(1024, 256), nn.ReLU(), nn.Dropout(0.3),
-            nn.Linear(256, num_classes),
-        )
-        self.regressor = nn.Sequential(
-            nn.Linear(1024, 256), nn.ReLU(), nn.Dropout(0.3),
-            nn.Linear(256, 2), nn.Sigmoid(),
-        )
-
-    def forward(self, frame_t, frame_t1):
-        feat = torch.cat([self.encoder(frame_t), self.encoder(frame_t1)], dim=1)
-        return self.classifier(feat), self.regressor(feat)
+from utils import *
 
 # ─── 评估 ────────────────────────────────────────────────────────────────────
 

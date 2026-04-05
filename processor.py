@@ -1,8 +1,8 @@
-import os, json, subprocess, shutil
+import os, json, subprocess, shutil, concurrent.futures
 from pathlib import Path
 
 FPS = 30
-IMG_SIZE = 224
+IMG_SIZE = 672
 
 # 文件名前缀 → 只保留的事件类型
 # 注意：长前缀必须排在短前缀前面，避免 click 误匹配 dblclick
@@ -13,6 +13,26 @@ PREFIX_TO_TYPE = [
     ('key',      'key'),
     ('scroll',   'scroll'),
 ]
+
+def convert_to_420p(recordings_dir):
+    recordings_dir = Path(recordings_dir)
+    for vf in sorted(recordings_dir.glob('*.mp4')):
+        tmp = vf.with_suffix('.tmp.mp4')
+        print(f'转换 {vf.name} -> yuv420p...')
+        result = subprocess.run([
+            'ffmpeg', '-y',
+            '-i', str(vf),
+            '-vf', 'format=yuv420p',
+            '-c:v', 'h264_nvenc',
+            str(tmp)
+        ], capture_output=True)
+        if result.returncode == 0:
+            tmp.replace(vf)  # 覆盖原文件
+            print(f'  ✓ {vf.name}')
+        else:
+            tmp.unlink(missing_ok=True)
+            print(f'  ✗ {vf.name} 转换失败：')
+            print(result.stderr.decode('utf-8', errors='ignore')[-300:])
 
 def get_expected_type(stem):
     """根据文件名前缀判断应该保留的事件类型，长前缀优先匹配"""
@@ -25,17 +45,32 @@ def get_expected_type(stem):
 def extract_frame(video_path, timestamp, output_path):
     cmd = [
         'ffmpeg', '-y',
+        '-hwaccel', 'cuda',
+        '-hwaccel_output_format', 'cuda',
         '-ss', f'{timestamp:.4f}',
         '-i', str(video_path),
         '-vframes', '1',
-        '-vf', f'scale={IMG_SIZE}:{IMG_SIZE}',
+        '-vf', f'scale_cuda={IMG_SIZE}:{IMG_SIZE},hwdownload,format=nv12',
+        '-pix_fmt', 'yuv420p',
         str(output_path)
     ]
     result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0:
-        print(result.stderr.decode('utf-8', errors='ignore')[-300:])
-    return result.returncode == 0
 
+    if result.returncode != 0:
+        # 降级到CPU
+        cmd_cpu = [
+            'ffmpeg', '-y',
+            '-ss', f'{timestamp:.4f}',
+            '-i', str(video_path),
+            '-vframes', '1',
+            '-vf', f'scale={IMG_SIZE}:{IMG_SIZE}',
+            str(output_path)
+        ]
+        result = subprocess.run(cmd_cpu, capture_output=True)
+        if result.returncode != 0:
+            print(result.stderr.decode('utf-8', errors='ignore')[-300:])
+
+    return result.returncode == 0
 
 def find_dblclicks(events, threshold=0.3):
     """
@@ -73,10 +108,9 @@ def process_one(video_path, json_path, output_dir):
         print(f'  无法识别文件名前缀：{stem}，跳过')
         return 0
 
-    # 已处理过则跳过
     if output_dir.exists() and any(output_dir.iterdir()):
         existing = len(list(output_dir.iterdir()))
-        print(f'  已处理过（{existing} 个样本），跳过。如需重新处理请手动删除 {output_dir}')
+        print(f'  已处理过（{existing} 个样本），跳过')
         return existing
 
     with open(json_path) as f:
@@ -85,7 +119,6 @@ def process_one(video_path, json_path, output_dir):
     raw_events = data['events']
     fps = data.get('fps', FPS)
 
-    # dblclick 录制需要先合并相邻 click
     if category == 'dblclick':
         events = find_dblclicks(raw_events)
     else:
@@ -94,29 +127,40 @@ def process_one(video_path, json_path, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     saved, skipped = 0, 0
 
-    for i, event in enumerate(events):
+    def process_event(args):
+        i, event = args
         t = event['t']
-        t_next = t + 1.0 / fps
+        t_before = max(0, t - 3.0 / fps)
+        t_next = t + 3.0 / fps
 
         sample_dir = output_dir / f'sample_{i:04d}'
         sample_dir.mkdir(exist_ok=True)
 
-        ft  = sample_dir / 'frame_t.png'
+        ft = sample_dir / 'frame_t.png'
         ft1 = sample_dir / 'frame_t1.png'
 
-        ok1 = extract_frame(video_path, t, ft)
+        ok1 = extract_frame(video_path, t_before, ft)
         ok2 = extract_frame(video_path, t_next, ft1)
 
         if not ok1 or not ok2 or not ft.exists() or not ft1.exists():
-            print(f'  跳过 sample_{i:04d}：ffmpeg 抽帧失败')
             shutil.rmtree(sample_dir, ignore_errors=True)
-            skipped += 1
-            continue
+            return i, False, event
 
         with open(sample_dir / 'action.json', 'w') as f:
             json.dump(event, f, indent=2)
+        return i, True, event
 
-        saved += 1
+    # 并发数别开太高，GPU解码有并发上限，8~16一般够
+    MAX_WORKERS = 8
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        results = list(executor.map(process_event, enumerate(events)))
+
+    for i, ok, event in results:
+        if ok:
+            saved += 1
+        else:
+            print(f'  跳过 sample_{i:04d}：ffmpeg 抽帧失败')
+            skipped += 1
 
     print(f'  类型={expected_type}，生成 {saved} 个样本，跳过 {skipped} 个')
     return saved
@@ -146,6 +190,8 @@ def check_dataset(dataset_dir):
 recordings = Path('recordings')
 dataset    = Path('dataset')
 total = 0
+
+convert_to_420p(recordings)
 
 for jf in sorted(recordings.glob('*.json')):
     vf = jf.with_suffix('.mp4')
